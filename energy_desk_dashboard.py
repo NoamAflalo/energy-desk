@@ -1,7 +1,6 @@
 # ==============================================
-# energy_desk_dashboard.py
+# energy_desk_dashboard.py — FINAL VERSION
 # RUN: streamlit run energy_desk_dashboard.py
-# DEPLOY: share.streamlit.io (free)
 # ==============================================
 import streamlit as st
 import pandas as pd
@@ -10,9 +9,8 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from datetime import datetime, timedelta
 import blpapi
-from sklearn.preprocessing import MinMaxScaler
 
-st.set_page_config(page_title="Noam Energy Desk", layout="wide", page_icon="flame")
+st.set_page_config(page_title="Noam Energy Desk", layout="wide", page_icon="fire")
 st.title("Noam Energy Desk")
 st.markdown("**Live COT + Prices + Distillate Z-Score & Correlations** — Built by @aflalo_noa37272")
 
@@ -25,11 +23,8 @@ def connect_to_bloomberg():
     session_options.setServerHost("localhost")
     session_options.setServerPort(8194)
     session = blpapi.Session(session_options)
-    if not session.start():
-        st.error("Failed to start Bloomberg session.")
-        return None
-    if not session.openService("//blp/refdata"):
-        st.error("Failed to open //blp/refdata")
+    if not session.start() or not session.openService("//blp/refdata"):
+        st.error("Bloomberg connection failed")
         return None
     return session
 
@@ -60,10 +55,9 @@ def process_response(session, ticker):
 @st.cache_data(ttl=3600)
 def load_all_data():
     session = connect_to_bloomberg()
-    if not session:
-        st.stop()
+    if not session: st.stop()
 
-    # --- COT TICKERS ---
+    # === COT TICKERS (same as your notebook 1) ===
     cot_tickers = {
         "Producer Long WTI Index": "CFFDQPML Index", "Producer Short WTI Index": "CFFDQPMS Index", "Producer Net WTI Index": "CFFDQPMN Index",
         "SD Long WTI Index": "CFFDQSWL Index", "SD Short WTI Index": "CFFDQSWS Index", "SD Net WTI Index": "CFFDQSWN Index",
@@ -92,7 +86,7 @@ def load_all_data():
         "NR Long GO Index": "ICFUANRL Index", "NR Short GO Index": "ICFUANRS Index", "NR Net GO Index": "ICFUANRN Index",
     }
 
-    # --- MARKET TICKERS ---
+    # === MARKET TICKERS (notebook 2) ===
     market_tickers = {
         'Sing GO': 'FSG1M1 Index', 'Sing GO M5': 'FSG1M5 Index', 'Sing GO M6': 'FSG1M6 Index',
         'Sing Kero': 'FSSKM1 Index', 'Sing Kero M4': 'FSSKM4 Index', 'Sing Kero M5': 'FSSKM5 Index', 'Sing Kero M6': 'FSSKM6 Index',
@@ -104,7 +98,7 @@ def load_all_data():
         '92 M1': 'FSGAM1 Index', '92 M5': 'FSGAM5 Index',
     }
 
-    # --- FUTURES ---
+    # === FUTURES ===
     futures_tickers = {"WTI": "CL1 Comdty", "BRENT": "CO1 Comdty", "RBOB": "XB1 Comdty", "HO": "HO1 Comdty", "GO": "QS1 Comdty"}
     end_date = datetime.now()
     start_date = end_date - timedelta(days=365*6)
@@ -126,7 +120,7 @@ def load_all_data():
                 df_cot[name] = tmp['PX_LAST']
         except: pass
 
-    # Build MultiIndex + Δ
+    # === MULTIINDEX + ABSOLUTE + Δ ===
     def parse_column(col_name):
         parts = col_name.rsplit(' ', 2)
         product = parts[1]
@@ -146,14 +140,13 @@ def load_all_data():
     df_cot.columns = pd.MultiIndex.from_tuples(new_tuples, names=["Product", "Reportable/Non", "Category", "Position"])
     df_cot = df_cot.sort_index(axis=1)
 
-    # Add Δ safely
-    if not df_cot.columns.get_level_values("Position").str.contains("Δ").any():
-        change_df = df_cot.diff()
-        new_cols = [(c[0], c[1], c[2], c[3] + " | Δ") for c in change_df.columns]
-        change_df.columns = pd.MultiIndex.from_tuples(new_cols, names=df_cot.columns.names)
-        df_cot = pd.concat([df_cot, change_df], axis=1).sort_index(axis=1)
+    # Add Δ columns
+    change_df = df_cot.diff()
+    new_cols = [(c[0], c[1], c[2], c[3] + " | Δ") for c in change_df.columns]
+    change_df.columns = pd.MultiIndex.from_tuples(new_cols, names=df_cot.columns.names)
+    df_cot = pd.concat([df_cot, change_df], axis=1).sort_index(axis=1)
 
-    # Futures
+    # Futures + weekly
     futures_df = pd.DataFrame()
     for name, ticker in futures_tickers.items():
         try:
@@ -170,7 +163,6 @@ def load_all_data():
                 futures_df[name] = tmp['PX_LAST']
         except: pass
 
-    # Weekly alignment
     cot_tuesdays = df_cot.index
     futures_weekly = futures_df.reindex(cot_tuesdays.union(futures_df.index)).ffill().reindex(cot_tuesdays)
 
@@ -214,37 +206,21 @@ def plot_cot(selections):
     for sel in selections:
         try:
             prod, rep, cat, pos = sel
-            pos_key = pos if "Δ" in pos else pos + " | Δ"
             if rep == "Non-Reportable":
-                series = df_cot.loc[:, idx[prod, "Non-Reportable", :, pos_key]]
+                series = df_cot.loc[:, idx[prod, "Non-Reportable", :, pos]]
             else:
-                series = df_cot.loc[:, idx[prod, "Reportable", cat, pos_key]]
+                series = df_cot.loc[:, idx[prod, "Reportable", cat, pos]]
             series = series.iloc[:, 0] if series.ndim > 1 else series
             series = series.dropna()
             if series.empty: continue
-            name = f"{prod} {cat if rep=='Reportable' else 'NR'} {pos.replace(' | Δ', ' Δ')}"
+            name = f"{prod} {cat if rep=='Reportable' else 'NR'} {pos}"
             fig.add_trace(go.Scatter(x=series.index, y=series.values, mode="lines+markers", name=name, line=dict(width=3), marker=dict(size=7)))
             plotted.append(name)
         except: pass
     title = " vs ".join(plotted) if plotted else "No data"
-    fig.update_layout(title=title, template="plotly_dark", height=600, yaxis_title="Weekly Change (contracts)", hovermode="x unified")
+    fig.update_layout(title=title, template="plotly_dark", height=600, yaxis_title="Contracts", hovermode="x unified")
     fig.update_xaxes(rangeslider_visible=True)
     fig.update_yaxes(zeroline=True, zerolinecolor="white")
-    st.plotly_chart(fig, use_container_width=True)
-
-def plot_price(items, weekly=True):
-    fig = make_subplots()
-    df_p = futures_weekly if weekly else futures_df
-    df_s = spread_weekly if weekly else spread_df
-    for item in items:
-        if item in df_p.columns:
-            s = df_p[item].dropna()
-        elif item in df_s.columns:
-            s = df_s[item].dropna()
-        else: continue
-        fig.add_trace(go.Scatter(x=s.index, y=s.values, mode="lines+markers" if weekly else "lines", name=item, line=dict(width=3)))
-    fig.update_layout(title=" | ".join(items) + (" — Weekly" if weekly else " — Daily"), template="plotly_dark", height=600)
-    fig.update_xaxes(rangeslider_visible=True)
     st.plotly_chart(fig, use_container_width=True)
 
 # ==============================================
@@ -253,21 +229,35 @@ def plot_price(items, weekly=True):
 tool = st.sidebar.selectbox("Tool", ["COT Positioning", "Distillate Z-Score & Correlations"])
 
 if tool == "COT Positioning":
-    st.header("COT Weekly Change")
+    st.header("COT Positioning")
     products = st.multiselect("Products", ["WTI", "BRENT", "RBOB", "HO", "GO"], default=["WTI", "BRENT"])
     cats = st.multiselect("Categories", ["MM", "OR", "Producer", "SD", "NR"], default=["MM", "OR"])
-    pos = st.radio("Position", ["Net | Δ", "Long | Δ", "Short | Δ"])
+    pos_type = st.radio("Show", ["Absolute Position", "Weekly Change (Δ)"])
+    pos = "Net" if pos_type == "Absolute Position" else "Net | Δ"
+
     selections = [(p, "Reportable" if c != "NR" else "Non-Reportable", c if c != "NR" else None, pos) for p in products for c in cats]
     plot_cot(selections)
 
     st.header("Prices & Spreads")
     price_items = st.multiselect("Select", ["WTI","BRENT","WTI-BRENT","RBOB","HO","GO"], default=["WTI","BRENT","WTI-BRENT"])
     weekly = st.checkbox("Weekly (Tue)", value=True)
-    plot_price(price_items, weekly=weekly)
+    df_p = futures_weekly if weekly else futures_df
+    df_s = spread_weekly if weekly else spread_df
+    fig = make_subplots()
+    for item in price_items:
+        if item in df_p.columns:
+            s = df_p[item].dropna()
+        elif item in df_s.columns:
+            s = df_s[item].dropna()
+        else: continue
+        fig.add_trace(go.Scatter(x=s.index, y=s.values, mode="lines+markers" if weekly else "lines", name=item, line=dict(width=3)))
+    fig.update_layout(title=" | ".join(price_items) + (" — Weekly" if weekly else " — Daily"), template="plotly_dark", height=600)
+    fig.update_xaxes(rangeslider_visible=True)
+    st.plotly_chart(fig, use_container_width=True)
 
 else:
     st.header("Correlation Matrix")
-    cols = st.multiselect("Select for correlation", df_market.columns.tolist(), default=["Sing GO","Gasoil Crack","Regrade","Jet Diff","Brent Swap M1"])
+    cols = st.multiselect("Select", df_market.columns.tolist(), default=["Sing GO","Gasoil Crack","Regrade","Jet Diff","Brent Swap M1"])
     if len(cols) > 1:
         corr = df_market[cols].corr()
         fig = go.Figure(data=go.Heatmap(z=corr.values, x=corr.columns, y=corr.columns, colorscale="RdYlGn", zmin=-1, zmax=1))
@@ -290,7 +280,7 @@ else:
     fig.add_trace(go.Scatter(x=df_z.index, y=df_z['Upper'], name="Upper", line=dict(dash="dash")))
     fig.add_trace(go.Scatter(x=df_z.index, y=df_z['Lower'], name="Lower", line=dict(dash="dash")))
     fig.add_trace(go.Scatter(x=divergences.index, y=divergences['Z'], mode="markers", name="Signal", marker=dict(color="red", size=10)))
-    fig.update_layout(title="Gasoil Crack Z-Score (Rollover-Adjusted)", template="plotly_dark", height=600)
+    fig.update_layout(title="Gasoil Crack Z-Score", template="plotly_dark", height=600)
     st.plotly_chart(fig, use_container_width=True)
 
 # ==============================================
